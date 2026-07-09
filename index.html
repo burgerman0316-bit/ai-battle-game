@@ -60,6 +60,31 @@
             transform: translate(0px, 0px);
             transition: transform 0.05s ease-out;
         }
+        .action-button {
+            position: absolute;
+            bottom: 50px;
+            right: 40px;
+            width: 90px;
+            height: 90px;
+            background: rgba(255, 0, 85, 0.1);
+            border: 2px solid rgba(255, 0, 85, 0.4);
+            border-radius: 50%;
+            box-shadow: 0 0 10px rgba(255, 0, 85, 0.2);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #ff0055;
+            font-weight: bold;
+            font-size: 14px;
+            letter-spacing: 1px;
+            pointer-events: auto;
+            touch-action: none;
+        }
+        .action-button:active {
+            background: rgba(255, 0, 85, 0.4);
+            box-shadow: 0 0 25px #ff0055;
+            color: #fff;
+        }
         #perf-monitor {
             position: absolute;
             top: 10px;
@@ -84,14 +109,18 @@
         <div class="joystick-container" id="joystick">
             <div class="joystick-knob" id="knob"></div>
         </div>
+        <div class="action-button" id="fire-btn">FIRE</div>
     </div>
 
     <script>
-        // --- ENGINE ARCHITECTURE CONFIG & GLOBALS ---
+        // --- CONFIG & CONFIGURATION ---
         const CONFIG = {
             playerSpeed: 8.0,
             turnSpeed: 2.5,
-            arenaSize: 50
+            arenaSize: 50,
+            maxProjectiles: 30,
+            projectileSpeed: 35.0,
+            fireRate: 0.18 // Delay in seconds between shots
         };
 
         let scene, camera, renderer;
@@ -100,43 +129,78 @@
         let frameCount = 0;
         let fpsTimer = 0;
 
-        // Optimized Input Vector Struct (Zero GC Allocations in loop)
+        // Audio Context (Lazy initialized on first interactive input)
+        let audioCtx = null;
+
+        // Input Storage Structures
         const inputVector = { x: 0, y: 0 };
         const moveVector = new THREE.Vector3();
+        let isFiringRequested = false;
+        let fireCooldownTimer = 0;
+
+        // --- INSTANCED HIGH-PERFORMANCE POOL DATA STRUCTURES ---
+        let projectileMesh;
+        const projectileData = []; // Array of tracking properties
+        let projectileNextIndex = 0;
+
+        // Setup matrix manipulation placeholders to prevent runtime GC allocations
+        const tempObject3D = new THREE.Object3D();
 
         // --- INITIALIZATION ---
         function init() {
             const container = document.getElementById('canvas-container');
 
-            // 1. Scene Setup with High-Contrast Fog for Performance/Aesthetics
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x050508);
             scene.fog = new THREE.FogExp2(0x050508, 0.035);
 
-            // 2. Camera Setup
             camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
             
-            // 3. Ultra-Optimized WebGL2 Renderer Settings
             renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
             renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Cap at 2x to save mobile fill-rate GPU bottlenecks
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             renderer.toneMapping = THREE.ACESFilmicToneMapping;
             renderer.toneMappingExposure = 1.2;
             container.appendChild(renderer.domElement);
 
-            // 4. Build Environment & Player
             createEnvironment();
             createPlayer();
             setupLights();
+            setupProjectilePool();
 
-            // 5. Input System Hook
             setupMobileInputs();
 
-            // 6. Window Resize Handler
             window.addEventListener('resize', onWindowResize, false);
 
-            // Kick off high-performance loop
             requestAnimationFrame(animate);
+        }
+
+        // --- AUDIO ENGINE SYNTHESIS (Zero Assets/No Network Dependency) ---
+        function initAudio() {
+            if (audioCtx === null) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+        }
+
+        function playLaserSound() {
+            if (!audioCtx) return;
+            
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            
+            osc.type = 'sawtooth';
+            // Fast frequency slide down for that high-tech heavy impact crackle
+            osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(110, audioCtx.currentTime + 0.12);
+            
+            gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+            gain.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
+            
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.15);
         }
 
         // --- GRAPHICS & WORLD CREATION ---
@@ -144,14 +208,12 @@
             const ambientLight = new THREE.AmbientLight(0x0a0a15);
             scene.add(ambientLight);
 
-            // Minimalistic high-intensity point lights to mimic cyberpunk/dark sci-fi vibe
             const directionalLight = new THREE.DirectionalLight(0x00ffc8, 1.5);
             directionalLight.position.set(10, 20, 10);
             scene.add(directionalLight);
         }
 
         function createPlayer() {
-            // Player Group container
             player = new THREE.Group();
             player.position.set(0, 1, 0);
 
@@ -166,39 +228,29 @@
             });
 
             const mesh = new THREE.Mesh(geometry, material);
-            mesh.rotation.x = Math.PI / 2; // Orient forward
+            mesh.rotation.x = Math.PI / 2;
             player.add(mesh);
             scene.add(player);
 
-            // Parent camera to player for a tight, high-performance third-person view chase
             camera.position.set(0, 5, -8);
             camera.lookAt(new THREE.Vector3(0, 1, 4));
             player.add(camera);
         }
 
         function createEnvironment() {
-            // Instantiate instance geometries to keep draw calls down to exactly 1
             const floorGeo = new THREE.PlaneGeometry(CONFIG.arenaSize, CONFIG.arenaSize, 10, 10);
-            const floorMat = new THREE.MeshStandardMaterial({ 
-                color: 0x101018, 
-                roughness: 0.4,
-                metalness: 0.7,
-                wireframe: false 
-            });
+            const floorMat = new THREE.MeshStandardMaterial({ color: 0x101018, roughness: 0.4, metalness: 0.7 });
             const floor = new THREE.Mesh(floorGeo, floorMat);
             floor.rotation.x = -Math.PI / 2;
             scene.add(floor);
 
-            // Add grid overlay for crisp sci-fi spatial awareness without texture processing costs
             const grid = new THREE.GridHelper(CONFIG.arenaSize, 50, 0x00ffc8, 0x222233);
             grid.position.y = 0.01;
             scene.add(grid);
 
-            // Create obstacles clustered into a single structural block
             const boxGeo = new THREE.BoxGeometry(2, 4, 2);
             const boxMat = new THREE.MeshStandardMaterial({ color: 0x1a1a26, roughness: 0.5, metalness: 0.5 });
             
-            // Instanced Mesh deployment prevents CPU-to-GPU handshake bottlenecks
             const instanceCount = 40;
             const instancedObstacles = new THREE.InstancedMesh(boxGeo, boxMat, instanceCount);
             const dummy = new THREE.Object3D();
@@ -207,7 +259,6 @@
                 let rx = (Math.random() - 0.5) * (CONFIG.arenaSize - 10);
                 let rz = (Math.random() - 0.5) * (CONFIG.arenaSize - 10);
                 
-                // Keep center clear
                 if(Math.abs(rx) < 5) rx += 10;
                 if(Math.abs(rz) < 5) rz += 10;
 
@@ -218,16 +269,66 @@
             scene.add(instancedObstacles);
         }
 
-        // --- HIGH-PERFORMANCE TOUCH INPUTS ---
+        // --- ARRAYS & MEMORY MANAGEMENT SETUP ---
+        function setupProjectilePool() {
+            // Raw capsule configuration representing glowing plasma bolt ammunition
+            const pGeo = new THREE.CapsuleGeometry(0.08, 0.6, 2, 4);
+            const pMat = new THREE.MeshBasicMaterial({
+                color: 0xff0055,
+            });
+
+            // Single Instanced Mesh handles ALL concurrent project lasers on 1 draw call
+            projectileMesh = new THREE.InstancedMesh(pGeo, pMat, CONFIG.maxProjectiles);
+            
+            // Populate tracking array buffer
+            for (let i = 0; i < CONFIG.maxProjectiles; i++) {
+                projectileData.push({
+                    active: false,
+                    position: new THREE.Vector3(),
+                    direction: new THREE.Vector3(),
+                    life: 0.0
+                });
+
+                // Move instance representation far below visible boundaries
+                tempObject3D.position.set(0, -1000, 0);
+                tempObject3D.updateMatrix();
+                projectileMesh.setMatrixAt(i, tempObject3D.matrix);
+            }
+            
+            projectileMesh.instanceMatrix.needsUpdate = true;
+            scene.add(projectileMesh);
+        }
+
+        // --- ENGINE REACTION TRIGGER CORES ---
+        function fireWeapon() {
+            initAudio();
+            playLaserSound();
+
+            const p = projectileData[projectileNextIndex];
+            p.active = true;
+            p.life = 1.5; // Seconds alive before auto pooling culls it
+            
+            // Pull tracking vectors from weapon origin points safely
+            p.position.copy(player.position).add(new THREE.Vector3(0, 0.4, 0));
+            
+            // Get direction vector based on the player mesh heading rotation rotation
+            p.direction.set(0, 0, 1).applyQuaternion(player.quaternion).normalize();
+
+            projectileNextIndex = (projectileNextIndex + 1) % CONFIG.maxProjectiles;
+        }
+
+        // --- HIGH-PERFORMANCE INTERACTION CONTROL ---
         function setupMobileInputs() {
             const joystick = document.getElementById('joystick');
             const knob = document.getElementById('knob');
+            const fireBtn = document.getElementById('fire-btn');
             const maxRadius = 50;
 
             let touchId = null;
             let startX = 0;
             let startY = 0;
 
+            // Joystick Management
             joystick.addEventListener('touchstart', (e) => {
                 if (touchId !== null) return; 
                 const touch = e.changedTouches[0];
@@ -235,6 +336,7 @@
                 const rect = joystick.getBoundingClientRect();
                 startX = rect.left + rect.width / 2;
                 startY = rect.top + rect.height / 2;
+                initAudio();
             }, { passive: true });
 
             window.addEventListener('touchmove', (e) => {
@@ -260,10 +362,8 @@
                     }
 
                     knob.style.transform = `translate(${dx}px, ${dy}px)`;
-
-                    // Normalize variables directly into our non-allocated Global Object
                     inputVector.x = dx / maxRadius;
-                    inputVector.y = -dy / maxRadius; // Invert for WebGL coordinates
+                    inputVector.y = -dy / maxRadius;
                 }
             }, { passive: true });
 
@@ -283,16 +383,26 @@
             window.addEventListener('touchend', endTouch, { passive: true });
             window.addEventListener('touchcancel', endTouch, { passive: true });
             
-            // Add desktop WASD fallback compatibility automatically
+            // Firing Trigger Event Handlers
+            fireBtn.addEventListener('touchstart', (e) => {
+                isFiringRequested = true;
+                initAudio();
+            }, { passive: true });
+
+            fireBtn.addEventListener('touchend', () => { isFiringRequested = false; }, { passive: true });
+
+            // Keyboard Spacebar Fallback Setup
             window.addEventListener('keydown', (e) => {
                 if(e.key === 'w' || e.key === 'ArrowUp') inputVector.y = 1;
                 if(e.key === 's' || e.key === 'ArrowDown') inputVector.y = -1;
                 if(e.key === 'a' || e.key === 'ArrowLeft') inputVector.x = -1;
                 if(e.key === 'd' || e.key === 'ArrowRight') inputVector.x = 1;
+                if(e.key === ' ') { isFiringRequested = true; initAudio(); }
             });
             window.addEventListener('keyup', (e) => {
                 if(['w', 's', 'ArrowUp', 'ArrowDown'].includes(e.key)) inputVector.y = 0;
                 if(['a', 'd', 'ArrowLeft', 'ArrowRight'].includes(e.key)) inputVector.x = 0;
+                if(e.key === ' ') isFiringRequested = false;
             });
         }
 
@@ -302,34 +412,66 @@
             renderer.setSize(window.innerWidth, window.innerHeight);
         }
 
-        // --- MAIN TICK EXECUTION LOOP (No-GC Frame Allocations) ---
+        // --- CORE PROCESS EXECUTION MATRIX TICKER ---
         function animate() {
             requestAnimationFrame(animate);
 
             const now = performance.now();
-            const deltaTime = Math.min((now - lastTime) / 1000, 0.1); // Clamp frame lag drops
+            const deltaTime = Math.min((now - lastTime) / 1000, 0.1);
             lastTime = now;
 
-            // 1. Process Rotational & Translation Physics
+            // 1. Process Core Player Handling Metrics
             if (inputVector.x !== 0 || inputVector.y !== 0) {
-                // Turn player relative to touch delta
                 player.rotation.y -= inputVector.x * CONFIG.turnSpeed * deltaTime;
-
-                // Move forward/backward relative to orientation
                 moveVector.set(0, 0, inputVector.y);
                 moveVector.applyQuaternion(player.quaternion);
                 player.position.addScaledVector(moveVector, CONFIG.playerSpeed * deltaTime);
 
-                // Arena boundary confinement limits
                 const halfArena = CONFIG.arenaSize / 2;
                 player.position.x = Math.max(-halfArena, Math.min(halfArena, player.position.x));
                 player.position.z = Math.max(-halfArena, Math.min(halfArena, player.position.z));
             }
 
-            // 2. Graphics Rendering Execution
+            // 2. Weapon Cooldown Processing Matrix
+            if (fireCooldownTimer > 0) {
+                fireCooldownTimer -= deltaTime;
+            }
+            if (isFiringRequested && fireCooldownTimer <= 0) {
+                fireWeapon();
+                fireCooldownTimer = CONFIG.fireRate;
+            }
+
+            // 3. Process & Translate Array Projectiles Array Buffer
+            let matrixNeedsUpdate = false;
+            for (let i = 0; i < CONFIG.maxProjectiles; i++) {
+                const p = projectileData[i];
+                if (p.active) {
+                    p.life -= deltaTime;
+                    if (p.life <= 0) {
+                        p.active = false;
+                        tempObject3D.position.set(0, -1000, 0); // Hide below ground
+                    } else {
+                        // Forward trajectory updating logic
+                        p.position.addScaledVector(p.direction, CONFIG.projectileSpeed * deltaTime);
+                        tempObject3D.position.copy(p.position);
+                        
+                        // Rotate geometry into its direction path vector
+                        tempObject3D.lookAt(p.position.clone().add(p.direction));
+                        tempObject3D.rotateX(Math.PI / 2);
+                    }
+                    tempObject3D.updateMatrix();
+                    projectileMesh.setMatrixAt(i, tempObject3D.matrix);
+                    matrixNeedsUpdate = true;
+                }
+            }
+            if (matrixNeedsUpdate) {
+                projectileMesh.instanceMatrix.needsUpdate = true;
+            }
+
+            // 4. Render Execution
             renderer.render(scene, camera);
 
-            // 3. Performance Overhead Counter Diagnostics
+            // 5. Profiling Metrics
             frameCount++;
             fpsTimer += deltaTime;
             if (fpsTimer >= 1.0) {
@@ -340,7 +482,6 @@
             }
         }
 
-        // Initialize Engine Core
         window.onload = init;
     </script>
 </body>
