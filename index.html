@@ -113,69 +113,82 @@
     </div>
 
     <script>
-        // --- CONFIG & CONFIGURATION ---
+        // --- CONFIGURATION ---
         const CONFIG = {
             playerSpeed: 8.0,
             turnSpeed: 2.5,
             arenaSize: 50,
             maxProjectiles: 30,
             projectileSpeed: 35.0,
-            fireRate: 0.18 // Delay in seconds between shots
+            fireRate: 0.18
         };
 
+        // Engine Handles
         let scene, camera, renderer;
-        let player, environmentMesh;
+        let player;
         let lastTime = performance.now();
         let frameCount = 0;
         let fpsTimer = 0;
-
-        // Audio Context (Lazy initialized on first interactive input)
         let audioCtx = null;
 
-        // Input Storage Structures
+        // Lazy-instantiated engine structs (allocated safely inside init to avoid racing the CDN)
         const inputVector = { x: 0, y: 0 };
-        const moveVector = new THREE.Vector3();
+        let moveVector;
+        let tempObject3D;
+        
         let isFiringRequested = false;
         let fireCooldownTimer = 0;
 
-        // --- INSTANCED HIGH-PERFORMANCE POOL DATA STRUCTURES ---
+        // Projectile Pool Structures
         let projectileMesh;
-        const projectileData = []; // Array of tracking properties
+        const projectileData = [];
         let projectileNextIndex = 0;
 
-        // Setup matrix manipulation placeholders to prevent runtime GC allocations
-        const tempObject3D = new THREE.Object3D();
-
-        // --- INITIALIZATION ---
+        // --- ENGINE INITIALIZATION ---
         function init() {
+            // Confirm Three.js loaded correctly before initialization attempts
+            if (typeof THREE === 'undefined') {
+                document.getElementById('perf-monitor').innerText = "ERROR: THREE.JS CDN BLOCKED OR LAGGING";
+                return;
+            }
+
+            // Safe Internal Structural Allocations
+            moveVector = new THREE.Vector3();
+            tempObject3D = new THREE.Object3D();
+
             const container = document.getElementById('canvas-container');
 
+            // 1. Scene Setup
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x050508);
-            scene.fog = new THREE.FogExp2(0x050508, 0.035);
+            scene.background = new THREE.Color(0x0a0a12);
+            scene.fog = new THREE.FogExp2(0x0a0a12, 0.03);
 
-            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            // 2. Camera Setup
+            camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1000);
             
+            // 3. WebGL Renderer Tuning
             renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             renderer.toneMapping = THREE.ACESFilmicToneMapping;
-            renderer.toneMappingExposure = 1.2;
+            renderer.toneMappingExposure = 1.0;
             container.appendChild(renderer.domElement);
 
+            // 4. Build Systems
+            setupLights();
             createEnvironment();
             createPlayer();
-            setupLights();
             setupProjectilePool();
-
             setupMobileInputs();
 
+            // 5. Global Window Handlers
             window.addEventListener('resize', onWindowResize, false);
 
+            // Fire engine rendering process
             requestAnimationFrame(animate);
         }
 
-        // --- AUDIO ENGINE SYNTHESIS (Zero Assets/No Network Dependency) ---
+        // --- AUDIO GENERATION ---
         function initAudio() {
             if (audioCtx === null) {
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -184,103 +197,118 @@
 
         function playLaserSound() {
             if (!audioCtx) return;
-            
-            const osc = audioCtx.createOscillator();
-            const gain = audioCtx.createGain();
-            
-            osc.type = 'sawtooth';
-            // Fast frequency slide down for that high-tech heavy impact crackle
-            osc.frequency.setValueAtTime(880, audioCtx.currentTime);
-            osc.frequency.exponentialRampToValueAtTime(110, audioCtx.currentTime + 0.12);
-            
-            gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
-            gain.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
-            
-            osc.connect(gain);
-            gain.connect(audioCtx.destination);
-            
-            osc.start();
-            osc.stop(audioCtx.currentTime + 0.15);
+            try {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(750, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 0.1);
+                
+                gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                gain.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+                
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.1);
+            } catch(e) {
+                console.log("Audio play blocked context");
+            }
         }
 
-        // --- GRAPHICS & WORLD CREATION ---
+        // --- LIGHTING & WORLD BUILDERS ---
         function setupLights() {
-            const ambientLight = new THREE.AmbientLight(0x0a0a15);
+            // Amplified lights to counter dark mobile screens
+            const ambientLight = new THREE.AmbientLight(0x1a1a30, 1.2);
             scene.add(ambientLight);
 
-            const directionalLight = new THREE.DirectionalLight(0x00ffc8, 1.5);
-            directionalLight.position.set(10, 20, 10);
+            const directionalLight = new THREE.DirectionalLight(0x00ffc8, 2.0);
+            directionalLight.position.set(15, 30, 15);
             scene.add(directionalLight);
+
+            const fillLight = new THREE.DirectionalLight(0xff0055, 0.8);
+            fillLight.position.set(-15, 10, -15);
+            scene.add(fillLight);
         }
 
         function createPlayer() {
             player = new THREE.Group();
             player.position.set(0, 1, 0);
 
-            // High-Contrast glowing player mesh
-            const geometry = new THREE.CylinderGeometry(0, 0.6, 2, 4);
+            // Glowing neon stylized pyramid for the ship design
+            const geometry = new THREE.ConeGeometry(0.6, 2, 4);
             const material = new THREE.MeshStandardMaterial({
                 color: 0x00ffc8,
-                roughness: 0.2,
-                metalness: 0.8,
+                roughness: 0.1,
+                metalness: 0.9,
                 emissive: 0x00ffc8,
-                emissiveIntensity: 0.3
+                emissiveIntensity: 0.6
             });
 
             const mesh = new THREE.Mesh(geometry, material);
-            mesh.rotation.x = Math.PI / 2;
+            mesh.rotation.x = Math.PI / 2; // Point forward along Z axis
             player.add(mesh);
             scene.add(player);
 
-            camera.position.set(0, 5, -8);
-            camera.lookAt(new THREE.Vector3(0, 1, 4));
+            // Rigid camera hierarchy setup
+            camera.position.set(0, 6, -10);
+            camera.lookAt(new THREE.Vector3(0, 1, 3));
             player.add(camera);
         }
 
         function createEnvironment() {
-            const floorGeo = new THREE.PlaneGeometry(CONFIG.arenaSize, CONFIG.arenaSize, 10, 10);
-            const floorMat = new THREE.MeshStandardMaterial({ color: 0x101018, roughness: 0.4, metalness: 0.7 });
+            // Floor Setup
+            const floorGeo = new THREE.PlaneGeometry(CONFIG.arenaSize, CONFIG.arenaSize);
+            const floorMat = new THREE.MeshStandardMaterial({ 
+                color: 0x14141f, 
+                roughness: 0.5, 
+                metalness: 0.6 
+            });
             const floor = new THREE.Mesh(floorGeo, floorMat);
             floor.rotation.x = -Math.PI / 2;
             scene.add(floor);
 
-            const grid = new THREE.GridHelper(CONFIG.arenaSize, 50, 0x00ffc8, 0x222233);
-            grid.position.y = 0.01;
+            // Structural Neon Grid
+            const grid = new THREE.GridHelper(CONFIG.arenaSize, 40, 0x00ffc8, 0x252538);
+            grid.position.y = 0.02;
             scene.add(grid);
 
-            const boxGeo = new THREE.BoxGeometry(2, 4, 2);
-            const boxMat = new THREE.MeshStandardMaterial({ color: 0x1a1a26, roughness: 0.5, metalness: 0.5 });
+            // Obstacles
+            const boxGeo = new THREE.BoxGeometry(25, 5, 2.5);
+            const boxMat = new THREE.MeshStandardMaterial({ 
+                color: 0x1d1d2b, 
+                roughness: 0.4, 
+                metalness: 0.6 
+            });
             
-            const instanceCount = 40;
+            const instanceCount = 35;
             const instancedObstacles = new THREE.InstancedMesh(boxGeo, boxMat, instanceCount);
             const dummy = new THREE.Object3D();
 
             for (let i = 0; i < instanceCount; i++) {
-                let rx = (Math.random() - 0.5) * (CONFIG.arenaSize - 10);
-                let rz = (Math.random() - 0.5) * (CONFIG.arenaSize - 10);
+                let rx = (Math.random() - 0.5) * (CONFIG.arenaSize - 12);
+                let rz = (Math.random() - 0.5) * (CONFIG.arenaSize - 12);
                 
-                if(Math.abs(rx) < 5) rx += 10;
-                if(Math.abs(rz) < 5) rz += 10;
+                // Keep spawning zone completely clear
+                if (Math.abs(rx) < 6) rx += 12;
+                if (Math.abs(rz) < 6) rz += 12;
 
-                dummy.position.set(rx, 2, rz);
+                dummy.position.set(rx, 1.25, rz);
+                dummy.rotation.y = Math.random() * Math.PI;
                 dummy.updateMatrix();
                 instancedObstacles.setMatrixAt(i, dummy.matrix);
             }
             scene.add(instancedObstacles);
         }
 
-        // --- ARRAYS & MEMORY MANAGEMENT SETUP ---
         function setupProjectilePool() {
-            // Raw capsule configuration representing glowing plasma bolt ammunition
-            const pGeo = new THREE.CapsuleGeometry(0.08, 0.6, 2, 4);
-            const pMat = new THREE.MeshBasicMaterial({
-                color: 0xff0055,
-            });
+            const pGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.8, 4);
+            const pMat = new THREE.MeshBasicMaterial({ color: 0xff0055 });
 
-            // Single Instanced Mesh handles ALL concurrent project lasers on 1 draw call
             projectileMesh = new THREE.InstancedMesh(pGeo, pMat, CONFIG.maxProjectiles);
             
-            // Populate tracking array buffer
             for (let i = 0; i < CONFIG.maxProjectiles; i++) {
                 projectileData.push({
                     active: false,
@@ -289,8 +317,7 @@
                     life: 0.0
                 });
 
-                // Move instance representation far below visible boundaries
-                tempObject3D.position.set(0, -1000, 0);
+                tempObject3D.position.set(0, -500, 0);
                 tempObject3D.updateMatrix();
                 projectileMesh.setMatrixAt(i, tempObject3D.matrix);
             }
@@ -299,25 +326,22 @@
             scene.add(projectileMesh);
         }
 
-        // --- ENGINE REACTION TRIGGER CORES ---
+        // --- ACTION CONTROLLERS ---
         function fireWeapon() {
             initAudio();
             playLaserSound();
 
             const p = projectileData[projectileNextIndex];
             p.active = true;
-            p.life = 1.5; // Seconds alive before auto pooling culls it
+            p.life = 1.2;
             
-            // Pull tracking vectors from weapon origin points safely
             p.position.copy(player.position).add(new THREE.Vector3(0, 0.4, 0));
-            
-            // Get direction vector based on the player mesh heading rotation rotation
             p.direction.set(0, 0, 1).applyQuaternion(player.quaternion).normalize();
 
             projectileNextIndex = (projectileNextIndex + 1) % CONFIG.maxProjectiles;
         }
 
-        // --- HIGH-PERFORMANCE INTERACTION CONTROL ---
+        // --- INTERACTIVE MOBILE TOUCH CONFIG ---
         function setupMobileInputs() {
             const joystick = document.getElementById('joystick');
             const knob = document.getElementById('knob');
@@ -328,7 +352,6 @@
             let startX = 0;
             let startY = 0;
 
-            // Joystick Management
             joystick.addEventListener('touchstart', (e) => {
                 if (touchId !== null) return; 
                 const touch = e.changedTouches[0];
@@ -383,7 +406,7 @@
             window.addEventListener('touchend', endTouch, { passive: true });
             window.addEventListener('touchcancel', endTouch, { passive: true });
             
-            // Firing Trigger Event Handlers
+            // Fire Handling
             fireBtn.addEventListener('touchstart', (e) => {
                 isFiringRequested = true;
                 initAudio();
@@ -391,7 +414,7 @@
 
             fireBtn.addEventListener('touchend', () => { isFiringRequested = false; }, { passive: true });
 
-            // Keyboard Spacebar Fallback Setup
+            // Universal Desktop Fallback Keymaps
             window.addEventListener('keydown', (e) => {
                 if(e.key === 'w' || e.key === 'ArrowUp') inputVector.y = 1;
                 if(e.key === 's' || e.key === 'ArrowDown') inputVector.y = -1;
@@ -407,12 +430,13 @@
         }
 
         function onWindowResize() {
+            if(!camera || !renderer) return;
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
         }
 
-        // --- CORE PROCESS EXECUTION MATRIX TICKER ---
+        // --- GAME SYSTEM PERFORMANCE RUNTIME MATRIX TICKER ---
         function animate() {
             requestAnimationFrame(animate);
 
@@ -420,7 +444,7 @@
             const deltaTime = Math.min((now - lastTime) / 1000, 0.1);
             lastTime = now;
 
-            // 1. Process Core Player Handling Metrics
+            // 1. Process Translation Transform Physics Loop
             if (inputVector.x !== 0 || inputVector.y !== 0) {
                 player.rotation.y -= inputVector.x * CONFIG.turnSpeed * deltaTime;
                 moveVector.set(0, 0, inputVector.y);
@@ -432,7 +456,7 @@
                 player.position.z = Math.max(-halfArena, Math.min(halfArena, player.position.z));
             }
 
-            // 2. Weapon Cooldown Processing Matrix
+            // 2. Weapon Processing Core
             if (fireCooldownTimer > 0) {
                 fireCooldownTimer -= deltaTime;
             }
@@ -441,7 +465,7 @@
                 fireCooldownTimer = CONFIG.fireRate;
             }
 
-            // 3. Process & Translate Array Projectiles Array Buffer
+            // 3. Render Matrix Updates for Lasers
             let matrixNeedsUpdate = false;
             for (let i = 0; i < CONFIG.maxProjectiles; i++) {
                 const p = projectileData[i];
@@ -449,13 +473,10 @@
                     p.life -= deltaTime;
                     if (p.life <= 0) {
                         p.active = false;
-                        tempObject3D.position.set(0, -1000, 0); // Hide below ground
+                        tempObject3D.position.set(0, -500, 0);
                     } else {
-                        // Forward trajectory updating logic
                         p.position.addScaledVector(p.direction, CONFIG.projectileSpeed * deltaTime);
                         tempObject3D.position.copy(p.position);
-                        
-                        // Rotate geometry into its direction path vector
                         tempObject3D.lookAt(p.position.clone().add(p.direction));
                         tempObject3D.rotateX(Math.PI / 2);
                     }
@@ -468,10 +489,10 @@
                 projectileMesh.instanceMatrix.needsUpdate = true;
             }
 
-            // 4. Render Execution
+            // 4. Draw Call Execution
             renderer.render(scene, camera);
 
-            // 5. Profiling Metrics
+            // 5. Diagnostics Overlay Data
             frameCount++;
             fpsTimer += deltaTime;
             if (fpsTimer >= 1.0) {
@@ -482,7 +503,8 @@
             }
         }
 
-        window.onload = init;
+        // Direct absolute execution invocation bypassing volatile event hooks
+        init();
     </script>
 </body>
 </html>
