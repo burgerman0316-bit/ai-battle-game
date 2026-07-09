@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Apex Mobile Web Engine</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            margin: 0;
+            padding: 0;
+        }
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050508;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        #canvas-container {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none;
+        }
+        .joystick-container {
+            position: absolute;
+            bottom: 40px;
+            left: 40px;
+            width: 120px;
+            height: 120px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 2px solid rgba(0, 255, 200, 0.2);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            pointer-events: auto;
+            touch-action: none;
+        }
+        .joystick-knob {
+            width: 50px;
+            height: 50px;
+            background: radial-gradient(circle, #00ffc8 0%, #008baa 100%);
+            border-radius: 50%;
+            box-shadow: 0 0 15px #00ffc8;
+            transform: translate(0px, 0px);
+            transition: transform 0.05s ease-out;
+        }
+        #perf-monitor {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #00ffc8;
+            font-family: monospace;
+            font-size: 12px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 6px 10px;
+            border-radius: 4px;
+            border: 1px solid rgba(0, 255, 200, 0.3);
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div id="ui-layer">
+        <div id="perf-monitor">FPS: -- | DC: --</div>
+        <div class="joystick-container" id="joystick">
+            <div class="joystick-knob" id="knob"></div>
+        </div>
+    </div>
+
+    <script>
+        // --- ENGINE ARCHITECTURE CONFIG & GLOBALS ---
+        const CONFIG = {
+            playerSpeed: 8.0,
+            turnSpeed: 2.5,
+            arenaSize: 50
+        };
+
+        let scene, camera, renderer;
+        let player, environmentMesh;
+        let lastTime = performance.now();
+        let frameCount = 0;
+        let fpsTimer = 0;
+
+        // Optimized Input Vector Struct (Zero GC Allocations in loop)
+        const inputVector = { x: 0, y: 0 };
+        const moveVector = new THREE.Vector3();
+
+        // --- INITIALIZATION ---
+        function init() {
+            const container = document.getElementById('canvas-container');
+
+            // 1. Scene Setup with High-Contrast Fog for Performance/Aesthetics
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x050508);
+            scene.fog = new THREE.FogExp2(0x050508, 0.035);
+
+            // 2. Camera Setup
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            // 3. Ultra-Optimized WebGL2 Renderer Settings
+            renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Cap at 2x to save mobile fill-rate GPU bottlenecks
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.2;
+            container.appendChild(renderer.domElement);
+
+            // 4. Build Environment & Player
+            createEnvironment();
+            createPlayer();
+            setupLights();
+
+            // 5. Input System Hook
+            setupMobileInputs();
+
+            // 6. Window Resize Handler
+            window.addEventListener('resize', onWindowResize, false);
+
+            // Kick off high-performance loop
+            requestAnimationFrame(animate);
+        }
+
+        // --- GRAPHICS & WORLD CREATION ---
+        function setupLights() {
+            const ambientLight = new THREE.AmbientLight(0x0a0a15);
+            scene.add(ambientLight);
+
+            // Minimalistic high-intensity point lights to mimic cyberpunk/dark sci-fi vibe
+            const directionalLight = new THREE.DirectionalLight(0x00ffc8, 1.5);
+            directionalLight.position.set(10, 20, 10);
+            scene.add(directionalLight);
+        }
+
+        function createPlayer() {
+            // Player Group container
+            player = new THREE.Group();
+            player.position.set(0, 1, 0);
+
+            // High-Contrast glowing player mesh
+            const geometry = new THREE.CylinderGeometry(0, 0.6, 2, 4);
+            const material = new THREE.MeshStandardMaterial({
+                color: 0x00ffc8,
+                roughness: 0.2,
+                metalness: 0.8,
+                emissive: 0x00ffc8,
+                emissiveIntensity: 0.3
+            });
+
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.rotation.x = Math.PI / 2; // Orient forward
+            player.add(mesh);
+            scene.add(player);
+
+            // Parent camera to player for a tight, high-performance third-person view chase
+            camera.position.set(0, 5, -8);
+            camera.lookAt(new THREE.Vector3(0, 1, 4));
+            player.add(camera);
+        }
+
+        function createEnvironment() {
+            // Instantiate instance geometries to keep draw calls down to exactly 1
+            const floorGeo = new THREE.PlaneGeometry(CONFIG.arenaSize, CONFIG.arenaSize, 10, 10);
+            const floorMat = new THREE.MeshStandardMaterial({ 
+                color: 0x101018, 
+                roughness: 0.4,
+                metalness: 0.7,
+                wireframe: false 
+            });
+            const floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.rotation.x = -Math.PI / 2;
+            scene.add(floor);
+
+            // Add grid overlay for crisp sci-fi spatial awareness without texture processing costs
+            const grid = new THREE.GridHelper(CONFIG.arenaSize, 50, 0x00ffc8, 0x222233);
+            grid.position.y = 0.01;
+            scene.add(grid);
+
+            // Create obstacles clustered into a single structural block
+            const boxGeo = new THREE.BoxGeometry(2, 4, 2);
+            const boxMat = new THREE.MeshStandardMaterial({ color: 0x1a1a26, roughness: 0.5, metalness: 0.5 });
+            
+            // Instanced Mesh deployment prevents CPU-to-GPU handshake bottlenecks
+            const instanceCount = 40;
+            const instancedObstacles = new THREE.InstancedMesh(boxGeo, boxMat, instanceCount);
+            const dummy = new THREE.Object3D();
+
+            for (let i = 0; i < instanceCount; i++) {
+                let rx = (Math.random() - 0.5) * (CONFIG.arenaSize - 10);
+                let rz = (Math.random() - 0.5) * (CONFIG.arenaSize - 10);
+                
+                // Keep center clear
+                if(Math.abs(rx) < 5) rx += 10;
+                if(Math.abs(rz) < 5) rz += 10;
+
+                dummy.position.set(rx, 2, rz);
+                dummy.updateMatrix();
+                instancedObstacles.setMatrixAt(i, dummy.matrix);
+            }
+            scene.add(instancedObstacles);
+        }
+
+        // --- HIGH-PERFORMANCE TOUCH INPUTS ---
+        function setupMobileInputs() {
+            const joystick = document.getElementById('joystick');
+            const knob = document.getElementById('knob');
+            const maxRadius = 50;
+
+            let touchId = null;
+            let startX = 0;
+            let startY = 0;
+
+            joystick.addEventListener('touchstart', (e) => {
+                if (touchId !== null) return; 
+                const touch = e.changedTouches[0];
+                touchId = touch.identifier;
+                const rect = joystick.getBoundingClientRect();
+                startX = rect.left + rect.width / 2;
+                startY = rect.top + rect.height / 2;
+            }, { passive: true });
+
+            window.addEventListener('touchmove', (e) => {
+                if (touchId === null) return;
+                
+                let targetTouch = null;
+                for (let i = 0; i < e.touches.length; i++) {
+                    if (e.touches[i].identifier === touchId) {
+                        targetTouch = e.touches[i];
+                        break;
+                    }
+                }
+
+                if (targetTouch) {
+                    let dx = targetTouch.clientX - startX;
+                    let dy = targetTouch.clientY - startY;
+                    let distance = Math.sqrt(dx * dx + dy * dy);
+
+                    if (distance > maxRadius) {
+                        dx = (dx / distance) * maxRadius;
+                        dy = (dy / distance) * maxRadius;
+                        distance = maxRadius;
+                    }
+
+                    knob.style.transform = `translate(${dx}px, ${dy}px)`;
+
+                    // Normalize variables directly into our non-allocated Global Object
+                    inputVector.x = dx / maxRadius;
+                    inputVector.y = -dy / maxRadius; // Invert for WebGL coordinates
+                }
+            }, { passive: true });
+
+            const endTouch = (e) => {
+                if (touchId === null) return;
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    if (e.changedTouches[i].identifier === touchId) {
+                        touchId = null;
+                        knob.style.transform = 'translate(0px, 0px)';
+                        inputVector.x = 0;
+                        inputVector.y = 0;
+                        break;
+                    }
+                }
+            };
+
+            window.addEventListener('touchend', endTouch, { passive: true });
+            window.addEventListener('touchcancel', endTouch, { passive: true });
+            
+            // Add desktop WASD fallback compatibility automatically
+            window.addEventListener('keydown', (e) => {
+                if(e.key === 'w' || e.key === 'ArrowUp') inputVector.y = 1;
+                if(e.key === 's' || e.key === 'ArrowDown') inputVector.y = -1;
+                if(e.key === 'a' || e.key === 'ArrowLeft') inputVector.x = -1;
+                if(e.key === 'd' || e.key === 'ArrowRight') inputVector.x = 1;
+            });
+            window.addEventListener('keyup', (e) => {
+                if(['w', 's', 'ArrowUp', 'ArrowDown'].includes(e.key)) inputVector.y = 0;
+                if(['a', 'd', 'ArrowLeft', 'ArrowRight'].includes(e.key)) inputVector.x = 0;
+            });
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- MAIN TICK EXECUTION LOOP (No-GC Frame Allocations) ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const now = performance.now();
+            const deltaTime = Math.min((now - lastTime) / 1000, 0.1); // Clamp frame lag drops
+            lastTime = now;
+
+            // 1. Process Rotational & Translation Physics
+            if (inputVector.x !== 0 || inputVector.y !== 0) {
+                // Turn player relative to touch delta
+                player.rotation.y -= inputVector.x * CONFIG.turnSpeed * deltaTime;
+
+                // Move forward/backward relative to orientation
+                moveVector.set(0, 0, inputVector.y);
+                moveVector.applyQuaternion(player.quaternion);
+                player.position.addScaledVector(moveVector, CONFIG.playerSpeed * deltaTime);
+
+                // Arena boundary confinement limits
+                const halfArena = CONFIG.arenaSize / 2;
+                player.position.x = Math.max(-halfArena, Math.min(halfArena, player.position.x));
+                player.position.z = Math.max(-halfArena, Math.min(halfArena, player.position.z));
+            }
+
+            // 2. Graphics Rendering Execution
+            renderer.render(scene, camera);
+
+            // 3. Performance Overhead Counter Diagnostics
+            frameCount++;
+            fpsTimer += deltaTime;
+            if (fpsTimer >= 1.0) {
+                document.getElementById('perf-monitor').innerText = 
+                    `FPS: ${frameCount} | DC: ${renderer.info.render.calls}`;
+                frameCount = 0;
+                fpsTimer = 0;
+            }
+        }
+
+        // Initialize Engine Core
+        window.onload = init;
+    </script>
+</body>
+</html>
